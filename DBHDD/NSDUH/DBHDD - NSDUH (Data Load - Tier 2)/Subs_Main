@@ -1,0 +1,95 @@
+Sub GenFilesList
+  /****************************************************************************************
+    Generates a list of all files in the Tier1 folder. Called by Main script.
+
+    Returns
+    --------
+    vFiles : String containing all file names in the Tier1 folder
+  ****************************************************************************************/
+  let vFiles=;
+  for each vF in filelist('lib://Client Data - DBHDD GASPS Stream/QVD\NSDUH\Tier1\*.qvd')
+      let vFiles = vFiles & '$(vF)';
+  next vF
+end sub
+
+Sub BuildYearlyTblsAndCompileList (vFlsLst)
+  /****************************************************************************************
+    Main subroutine for iterating through all tables for each year and calling all 
+    subroutines involved in compiling a single table for each year, to be subsequently 
+    concatenated together.  
+    
+    Parameters:
+    ------------
+    vFlsLst : String containing name of the current loaded file
+    
+    Returns:
+    ---------
+    vYT : String containing the comma separated working list of the fully-compiled year-
+    	  specific tables, containing both statewie and substate data, if applicable, for 
+          all metrics from a given year; returned by BuildSingleYearlyTbl
+  ****************************************************************************************/
+  let vYearTables=;
+  let vFileYears = '0,2,3,4,5,6';
+  for each vYearFiles in $(vFileYears)
+    call BuildSingleYearlyTbl (vFlsLst, vYearFiles, vYearTables)
+  next vYearFiles
+end sub
+
+Sub ConcatYearlyTbls (vConcatCounter, vFullYearTbl, vYCStmt)
+  /****************************************************************************************
+    Loader subroutine called by BuildMasterTable for concatenating together the composite
+    tables for each year. Called by BuildMasterTable. 
+    
+    Parameters:
+    ------------
+    vConcatCounter : The iteration number for the current call to this method 
+    vFullYearTbl   : String containing the name of the table to join all tables to
+    vYCStmt        : Depending on the iteration, either the empty string (first iteration) 
+    				 or a string containing a 'Concatenate' statement, including the table 
+                     to concatenate to (all subsequent iterations)
+  ****************************************************************************************/
+  If $(vConcatCounter)=1 then
+    let vMainYrTbl = vFullYearTbl;
+  end if
+  $(vYCStmt)
+  Load Distinct * Resident [$(vFullYearTbl)];
+  let vYCStmt = 'Concatenate ([$(vMainYrTbl)])';
+  If $(vConcatCounter)>1 then
+    Drop Table [$(vFullYearTbl)];
+  end if
+  let vConcatCounter = $(vConcatCounter)+1;
+end sub
+
+Sub BuildMasterTable (vYearlyTblsList)
+  /****************************************************************************************
+    Initializes variables and iteratively calls ConcatYearlyTbls to construct the final 
+    "master" table to be stored in the Tier 2 qvd folder. 
+    
+    Parameters:
+    ------------
+    vYearlyTblsList : String containing the comma separated working list of the fully-
+    				  compiled year-specific tables, containing both statewie and substate 
+                      data, if applicable, for all metrics from a given year; returned by 
+                      BuildSingleYearlyTbl
+  ****************************************************************************************/
+  let vConcatNum=1;
+  let vYrsConc=;
+  For each vYearlyTbl in $(vYearlyTblsList)
+    call ConcatYearlyTbls (vConcatNum, vYearlyTbl, vYrsConc)
+  next vYearlyTbl
+end sub
+
+Sub StoreMasterTbl (vBaseYrTbl)
+  /****************************************************************************************
+    Stores the Tier2 data table in the Tier2 destination folder. Called by Main script.
+    
+    Parameters:
+    ------------
+    vBaseYrTbl : Main Tier2 data table.
+  ****************************************************************************************/
+  Set vDestQVDFolder = 'lib://Client Data - DBHDD GASPS Stream/QVD/NSDUH/TEST';
+  let vSep = '/';
+  LET vTblNameP = '$(vBaseYrTbl)';
+  Let vQVD = vDestQVDFolder & vSep & vBaseYrTbl;
+  STORE [$(vBaseYrTbl)] INTO '$(vQVD).qvd' (qvd);
+end sub
