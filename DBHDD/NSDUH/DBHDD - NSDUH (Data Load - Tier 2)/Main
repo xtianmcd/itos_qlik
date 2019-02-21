@@ -1,0 +1,7 @@
+call GenFilesList
+
+call BuildYearlyTblsAndCompileList (vFiles)
+
+call BuildMasterTable (vYearTables)
+
+call StoreMasterTbl (vMainYrTbl)
