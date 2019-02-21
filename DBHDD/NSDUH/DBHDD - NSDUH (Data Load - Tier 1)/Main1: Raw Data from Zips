@@ -1,0 +1,14 @@
+for each vfile in filelist('lib://Client Data - DBHDD GASPS Stream/RAW\NSDUH\*.csv')
+
+  Trace Fetching Data for File at $(vfile);
+  Let vFileName = Subfield(Subfield('$(vfile)','/',-1), '.',1); //get the filename from the file path 
+  
+  call GetTitle(vfile)
+  call FindHeaders(vfile)
+  call TempFieldNames (vfile, vHeaderSize, vFileName) 
+  call MainTable (vfile, vHeaderSize, vFileName, vTableName)
+
+next vfile 
+
+call UniqueFieldNames
+
