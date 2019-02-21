@@ -1,0 +1,15 @@
+Set vDestQVDFolder = 'lib://Client Data - DBHDD GASPS Stream/QVD/NSDUH/Tier1';
+let vSep = '/';
+
+FOR vCount = 0 to NoOfTables()-1 Step 1
+
+	call QVDStore ($(vCount), vDestQVDFolder, vSep)
+	
+NEXT vCount
+
+Set vCount=;
+Set vTableName=;
+Set vDestQVDFolder=;
+Set vQVD=;
+
+Exit Script;
