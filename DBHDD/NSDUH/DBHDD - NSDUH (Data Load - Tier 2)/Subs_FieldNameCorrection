@@ -1,0 +1,146 @@
+Sub ColHeaderSub (tbl, age, tbln)
+  /****************************************************************************************
+    Constructs the field name for the current table's metric and unit, to be saved in the 
+    final Tier2 data table. Called by GenAlcBingeFields and LoadFields. 
+    
+    Parameters
+    -----------
+    tbl  : String containing the full name of the table, returned by GetMetric 
+    age  : String containing comma delimited list of relevant field names from the current 
+    	   table
+    tbln : String containing the name of the current table as it is saved in Tier1
+    
+    Returns
+    --------
+    vColHeader : String containing the constructed field name with appropriate metric
+    			 identifyer and unit
+  ****************************************************************************************/
+  let vMetric = 
+    Pick(WildMatch('$(age)','*Binge*','*Alcohol*')+1,
+      Pick(WildMatch('$(tbl)', '*Perception*','*Disorder*','*Dependence*','*Needing*','*Use*','*Mental*','*Suicide*','*Depressive*','*Initiates*'),
+        Pick(WildMatch('$(tbl)','*Cocaine*','*Heroin*','*Marijuana*','*Drinks*','*Cigarettes*'),
+          'Risk Percep. - Cocaine','Risk Percep. - Heroin','Risk Percep. - MJ','Risk Percep. - Binge','Risk Percep. - Cig.'
+          ),
+        Pick(WildMatch('$(tbl)','*Pain*','*Illicit*','*Alcohol*','*Substance*'),
+          'Dependence/Abuse - Pain Rlvr','Dependence/Abuse - Illicit','Dependence/Abuse - Alc.','Dependence/Abuse - Substance'
+          ),
+        Pick(WildMatch('$(tbl)','*Illicit*','*Alcohol*'),
+          Pick(WildMatch('$(tbl)','*Alcohol*','*Abuse*')+1,
+            'Dependence - Illicit','Dependence/Abuse - Substance','Dependence/Abuse - Illicit'
+            ),
+          Pick(WildMatch('$(tbl)','*Abuse*')+1, 'Dependence - Alc.','Dependence/Abuse - Alc.')
+          ),
+        Pick(WildMatch('$(tbl)','*Substance*','*Illicit*','*Alcohol*'),
+          'NeedNoTreat - Substance','NeedNoTreat - Illicit','NeedNoTreat - Alc.'
+          ),
+        Pick(WildMatch('$(tbl)',
+          '*Disorder*','*Needing*','*Illicit*','*Cocaine*','*Heroin*','*Pain*','*Marijuana*','*Alcohol*','*Tobacco*','*Cigarette*'
+          )-2, 
+          Pick(WildMatch('$(tbl)','*Marijuana*')+1, 'Use - Illicit', 'Use - Illicit (non-MJ)'), 
+          'Use - Cocaine', 'Use - Heroin', 'Use - Pain Rlvr',
+          Pick(WildMatch('$(tbl)', '*Month*','*Year*','*First*'), 'Use - MJ (mo)','Use - MJ (yr)','Use - MJ (1st)'),
+          Pick(WildMatch('$(tbl)', '*Binge*')+1, 'Use - Alc.', 'Use - Binge'),
+          'Use - Tobacco','Use - Cig.'
+        ),
+        Pick(WildMatch('$(tbl)','*Any*','*Serious*','*Services*'),'Mental Illness - Any','Mental Illness - Srs','Mental Illness - Tx'),
+        'Suic.','Depr. Ep.','Use - MJ (1st)'),
+      'Use - Binge','Use - Alc.'
+    )
+  ;
+  let vUnit = Pick(WildMatch(SubField('$(tbln)','_',-1), '*%*','*#*'), ' - %',' - #');
+  let vColHeader = '$(vMetric)'&'$(vUnit)';
+end Sub
+
+Sub GenAlcBingeFields (vFieldList, vTableFull, vTableName)
+  /****************************************************************************************
+    Calls ColHeaderSub to generate the Tier2 field name(s) for the metric(s) recorded for 
+    the anomalistic 12-20 age group; if the table contains more than one metric, 
+    ColHeaderSub is called recursively and the variable with the field names becomes a 
+    comma delimited list. Called by LoadFields.
+    
+    Parameters
+    -----------
+    vFieldList : String containing comma delimited list of relevant field names from the 
+    			 current table
+    vTableFull : String containing the full name of the table, returned by GetMetric
+    vTableName : String containing the name of the current table as it is saved in Tier1
+    
+    Returns
+    --------
+    vHeaders : String containing the metric name(s) returned by ColHeaderSub; if more than
+    		   one metric in the table, will be a comma delimited string
+  ****************************************************************************************/
+  let vHeaders = ;
+  let vComma =;
+  let vMetrics=;
+  let vNumMetrics = SubStringCount('$(vFieldList)',',')+1;
+  for h =1 to $(vNumMetrics)
+    Let vAlcAge = Subfield('$(vFieldList)', ',', h);
+    call ColHeaderSub (vTableFull, vAlcAge, vTableName)
+    let vHeaders = '$(vHeaders)' & '$(vComma)' & '$(vColHeader)';
+//     let vMetrics = '$(vMetrics)' & '$(vComma)' & PurgeChar('$(vColHeader)', '#%');
+    let vComma = ',';
+  next h
+end sub
+
+Sub GenAlcBingeLoadStmt (vHeaderList, vFieldList)
+  /****************************************************************************************
+    Generates the load statement for loading the anomalistc 12-20 age group's 
+    metric's/metrics' data under the corresponding field name(s) returned by 
+    GenAlcBingeFields. Called by LoadFields. 
+    
+    Parameters
+    -----------
+    vHeaderList : String containing field name(s) returned by GenAlcBingeFields
+    vFieldList  : String containing comma delimited list of relevant field names from the 
+    			  current table
+                
+    Returns
+    --------
+    vLoadAs : String containing the load statement for loading the anomolistic 12-20 age
+    		  group data
+  ****************************************************************************************/
+  let vLoadAs =;
+  let vComma =;
+  for c = 1 to SubStringCount('$(vHeaderList)',',')+1
+    let vLoadAs = '$(vLoadAs)' & '$(vComma)' & SubField('$(vFieldList)',',' ,c) & ' as [' & SubField('$(vHeaderList)', ',', c) &']';  
+    let vComma = ',';
+  next c
+//   let vLoadAs = '$(vLoadAs)'; // & ']';
+end sub
+
+Sub LoadCorrectFields (vLoadAsStmt)
+  /****************************************************************************************
+    Reloads the table constructed by FormatFields, renaming fields as indicated in the 
+    load statement returned by GenAlcBingeLoadStmt. Called by LoadFields.
+    
+    Parameters
+    -----------
+    vLoadAsStmt : String containing Tier1 table-specific load statement.
+  ****************************************************************************************/
+  let vResiTbl = TableName(NoOfTables()-1);
+  [NewNewTbl]:
+    Load 
+      $(vLoadAsStmt), *
+    Resident [$(vResiTbl)]
+  ;
+  Drop Table [$(vResiTbl)];
+end sub
+
+Sub DropAlcBingeFields (vNum, vFieldList)
+  /****************************************************************************************
+    Drops field(s) loaded from the table with anomalistc 12-20 age group data. Called by 
+    LoadFields.
+    
+    Parameters
+    -----------
+    vNum       : Integer indicating the number of fields needing to be dropped; 
+    			 corresponds to the number of metrics in the current anomalistic table
+    vFieldList : String containing comma delimited list of relevant field names from the 
+    			 current table
+  ****************************************************************************************/
+  for vDF = 1 to $(vNum)
+    let vDropField = Subfield('$(vFieldList)', ',', $(vDF));
+    Drop Field $(vDropField);
+  next vDF
+end sub
