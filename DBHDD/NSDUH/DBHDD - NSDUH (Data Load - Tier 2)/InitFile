@@ -1,0 +1,154 @@
+Sub GetMetric (vFileName)
+  /****************************************************************************************
+    Gets the full table name from the current file, which indicates the metric that the file
+    represents and other information. Called by FileInit.
+  
+    Parameters
+    -----------
+    vFileName : String containing the name of the file as it is saved in Tier1
+    
+    Returns
+    --------
+    vTblFull : String containing the full name of the file, saved under the file's 
+    		   TableName_ field.
+  ****************************************************************************************/
+  MetricTbl:
+    Load TableName_ as TblFull from $(vFileName) (qvd)
+  ;
+  Let vTblFull = peek('TblFull');
+  Drop Table MetricTbl;
+end Sub
+
+Sub GenAgeList (vFileName)
+  /****************************************************************************************
+    Generates a list of the age groups present in the file; useful for loading the correct
+    fields and identifying tables with anomalistic field naming conventions. Called by 
+    FileInit.
+    
+    Parameters
+    -----------
+    vFileName : String containing the name of the file as it is saved in Tier1
+    
+    Returns
+    --------
+    vAgeList : String containing the list of age groups in current file, comma delimited
+  ****************************************************************************************/
+  Set vAgeList=;
+  set vComma=;
+  For i = 1 to QvdNoOfFields('$(vFileName)')   
+    Let vFieldName = QvdFieldName('$(vFileName)', $(i));
+    If '$(vFieldName)' like '*Estimate*' and WildMatch('$(vFieldName)', '*CI*')<1 then
+      Let vAgeList = '$(vAgeList)' & '$(vComma)' & '$(vFieldName)';
+      Set vComma='],[';
+    End If
+  Next i 
+  Let vAgeList = '[' & '$(vAgeList)' & ']';
+end sub
+
+Sub LoadXTbl (vAttr, vTableName, vN, vLoadStmt, vFileName, vWhereStmt)
+  /****************************************************************************************
+    Loads the data from Tier1 as a CrossTable to generate a Field with the age groups in 
+    the file. Called by SetupFields.
+    
+    Parameters
+    -----------
+    vAttr      : String containing name of Field created by CrossTable, to hold the age
+    			 age group field names in the Tier1 file
+    vTableName : String containing the name of file as it is saved in Tier1
+    vN         : Int representing the number of initial fields to skip for CrossTable load
+    vLoadStmt  : String containing the vN fields to load before the main CrossTable
+    vFileName  : String containing the full path to the file saved in Tier1
+    vWhereStmt : String containing the conditions on which rows are loaded from vFileName
+  ****************************************************************************************/
+  TblFormat:
+    CrossTable([$(vAttr)],[$(vTableName)],$(vN))
+    Load
+        $(vLoadStmt)
+    from $(vFileName) (qvd)
+    $(vWhereStmt)
+  ;
+end sub
+
+Sub LoadGeneric (vResident)
+  /****************************************************************************************
+    Performs a Generic Load on the given table; this is called for tables with the 12-20
+    age group, which do not use the age group as the field name and sometimes have more
+    than one metric in a single table, thus needing additional formatting. Called by 
+    GenericTableLoadSequence.
+    
+    Parameters
+    -----------
+    vResident : String containing the name of the table just loaded by LoadXTbl
+  ****************************************************************************************/
+  GenericLabel:
+    generic load *
+    resident [$(vResident)]
+  ;
+end sub
+
+Sub GenGenericTblList
+  /****************************************************************************************
+    Builds list of the Generic Tables loaded by LoadGeneric; useful for the tables with 
+    the 12-20 age group which also contain more than one metric (i.e., Binge Drinking and 
+    Alcohol Use data for 12-20 age group. Called by GenericTableLoadSequence.
+    
+    Returns
+    --------
+    vListOfTables : String containing the table names loaded by LoadGeneric; comma delim.
+  ****************************************************************************************/
+  Set vListOfTables = ;
+  For vTableNo = 0 to NoOfTables()
+    Let vTableName = TableName($(vTableNo)) ;
+    If Subfield(vTableName,'.',1)='GenericLabel' Then
+       Let vListOfTables = vListOfTables & If(Len(vListOfTables)>0,',') & Chr(39) & vTableName & Chr(39) ;
+    End If
+  Next vTableNo
+end sub
+
+Sub LoadCombinedGeneric (vResident, vTblList)
+  /****************************************************************************************
+    Loads a single table with all Generic tables loaded by LoadGeneric (for a given year). 
+    Uuseful for the tables with the 12-20 age group which also contain more than one metric 
+    (i.e., Binge Drinking and Alcohol Use data for 12-20 age group. Called by 
+    GenericTableLoadSequence.
+    
+    Parameters
+    -----------
+    vResident : String containing the name of the table just loaded by LoadXTbl
+    vTblList  : List of currently loaded Generic tables returned by GenGenericTblList 
+  ****************************************************************************************/
+  CombinedGenericTable:
+    Load distinct Key Resident [$(vResident)]
+  ;
+  For each vTableName in $(vTblList)
+    Left Join (CombinedGenericTable) Load * Resident [$(vTableName)];
+    Drop Table [$(vTableName)];
+  Next vTableName
+  Drop Table [$(vResident)];
+end sub
+
+Sub LoadFinalGeneric (vCombinedGeneric)
+  /****************************************************************************************
+    Reloads the composite Generic table loaded by LoadCombinedGeneric, renaming and 
+    dropping fields as needed. Called by GenericTableLoadSequence.
+  ****************************************************************************************/
+  FullGenericTable:
+    Load *, '12-20 Estimate' as FullAge
+    resident $(vCombinedGeneric)
+  ;
+  Drop Table $(vCombinedGeneric);
+  Drop Field Key;
+end sub
+
+Sub GenericTableLoadSequence
+  /****************************************************************************************
+    Sequentially calls the subroutines involved in constructing the correctly formatted
+    table containing data for the 12-20 age group; these tables are formatted differently
+    than all other tables and require additional steps. Called by SetupFields.
+  ****************************************************************************************/
+  let vResTbl = TableName(NoOfTables()-1);
+  call LoadGeneric (vResTbl)
+  call GenGenericTblList
+  call LoadCombinedGeneric (vResTbl, vListOfTables)
+  call LoadFinalGeneric ('CombinedGenericTable')
+end sub
