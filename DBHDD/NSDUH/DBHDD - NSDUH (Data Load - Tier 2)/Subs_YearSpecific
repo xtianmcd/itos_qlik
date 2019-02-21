@@ -1,0 +1,405 @@
+Sub FileInit (vLoop, vFileName)
+  /****************************************************************************************
+    Sets initial variables and calls set-up subroutines GetMetric and GenAgeList.
+    
+    Parameters
+    -----------
+    vLoop     : Int indicating whether to use the default Unit '%' or switch to '#' for 
+    		    raw number tables
+    vFileName : String containing the name of the file as it is saved in Tier1
+    
+    Returns
+    --------
+    vFileStr : String containing the name of the file with the appropriate unit for 
+    		   loading from Tier1 folder
+    vTblName : String containing name of table denoted by vFileStr as it is saved in Tier1
+    vTblFull : Returned by GetMetric
+    vAgeList : Returned by GenAgeList
+  ****************************************************************************************/
+  let vFileStr = If($(vLoop)>1, Replace('$(vFileName)', '%', '#'),'$(vFileName)');
+  Let vTblName = QvdTableName('$(vFileStr)');
+  call GetMetric (vFileStr)
+  call GenAgeList (vFileStr)
+end sub
+
+Sub SetupFields (vTableName, vFileString, vFieldList)
+  /****************************************************************************************
+    Constructs the table-specific load statements and calls the subroutines involved with 
+    the initial loading and formatting of the current table. Called by 
+    CompileMetricSpecificTable.
+    
+    Parameters
+    -----------
+    vTableName  : String containing the name of the current table as it is saved in Tier1 
+    vFileString : String containing the full path to the current table in Tier1
+    vFieldList  : String containing comma delimited list of relevant field names from the 
+    		 	  current table
+  ****************************************************************************************/
+  let vSt = If(WildMatch('$(vTableName)', '*ss*')>0,QvdFieldName('$(vFileString)',3), QvdFieldName('$(vFileString)',2));
+  let vState = '['&'$(vSt)'&'] as Location';
+  let vTblYear = If(WildMatch('$(vTableName)', '*ss*'), SubField(SubField(SubField('$(vFileString)','/',-1),'_',1), 'ss', 1), SubField(SubField('$(vFileString)','/',-1),'_',1));
+  let vLoadWhere = If(Wildmatch('$(vTableName)', '*ss*')>0, 'where WildMatch([$(vSt)],'&Chr(39)&'*Region*'&Chr(39)&')>0','');
+  If WildMatch('$(vFieldList)', '*Alcohol*')>0 then
+    Let vLoadStmtGen = '$(vTblYear) as Year,' & '$(vState),' & ' Autonumber($(vTblYear) & ' &Chr(39)& '|' &Chr(39)& '& $(vSt)) as Key,' & '$(vFieldList)';
+    call LoadXTbl('AlcBinge', vTableName, 3, vLoadStmtGen, vFileString, vLoadWhere)
+    call GenericTableLoadSequence
+  else 
+    Let vLoadStatement = '$(vTblYear) as Year,' & '$(vState),' & '$(vFieldList)';
+    call LoadXTbl('FullAge', vTableName, 2, vLoadStatement, vFileString, vLoadWhere)
+  end if 
+end sub
+
+Sub FormatFields(vTableName, vTableFull)
+  /****************************************************************************************
+    Reloads the table constructed by SetupFields, renaming fields as needed. Called by 
+    CompileMetricSpecificTable.
+  ****************************************************************************************/
+  let vRsdntTbl = TableName(NoOfTables()-1);
+  NewTbl:
+    Load
+      *, If(WildMatch('$(vTableName)','*ss*')>0, Replace(SubField(SubField('$(vTableFull)', ',', 1),'Aged ', -1),' to ','-'), Replace(FullAge,SubField(FullAge,' ',-1),'')) as Age
+    Resident $(vRsdntTbl)
+  ;
+  Drop Table $(vRsdntTbl);
+end sub
+
+Sub LoadFields (vFieldList, vTableFull, vTableName, vFileString)
+  /****************************************************************************************
+    Determines whether the current table contains the expected field formatting or the 
+    anomalistic field formatting (i.e., the 12-20 age group) and calls the corresponding
+    subroutines for loading and reformatting the Tier1 table. Subsequently drops excess
+    fields and renames loaded table with a unique identifier. Called by 
+    CompileMetricSpecificTable.
+    
+    Parameters
+    -----------
+    vFieldList  : String containing comma delimited list of relevant field names from the 
+    			  current table
+    vTableFull  : String containing the full name of the table, returned by GetMetric
+    vTableName  : String containing the name of the current table as it is saved in Tier1
+    vFileString : String containing the full path to the current table in Tier1
+  ****************************************************************************************/
+  if WildMatch('$(vFieldList)', '*Alcohol*')>0 then
+    call GenAlcBingeFields (vFieldList, vTableFull, vTableName)
+    call GenAlcBingeLoadStmt (vHeaders, vFieldList)
+    call LoadCorrectFields (vLoadAs)
+    call DropAlcBingeFields (vNumMetrics, vFieldList)
+  else 
+    call ColHeaderSub (vTableFull, '', vTableName)
+    let vLoadAs = '['& '$(vTableName)' & ']' &' as '& '['&'$(vColHeader)'&']';
+    call LoadCorrectFields (vLoadAs)
+    Drop Field [$(vTableName)];
+  end if
+  Drop Field FullAge;
+  let vLoadedFile = TableName(NoOfTables()-1);
+  let vFileUnit = SubField(SubField('$(vFileString)','_',-1),'.',1);
+  let vUniqueFile = '$(vLoadedFile)-$(vFileUnit)';
+  Rename Table [$(vLoadedFile)] to [$(vUniqueFile)];
+end sub
+
+Sub CompileRegFileFeatsAndRows (vYearOfFile, vIterOfFile, vLoadedFileName, vIterVar, vAgesList, vHeadersList, vYearlyTablesList)
+  /****************************************************************************************
+    Loads the satewide percentage data for a given metric and calls the subroutines 
+    involved in loading the metric's statewide raw number data, population size and 
+    anomalistic 12-20 age group data if appropriate; combines all this into a single 
+    table for a given statewide metric in a given year. Maintains a list of all tables
+    loaded in final for subsequent joining together of all tables within a given year.
+    Called by CompileMetricSpecificTable.
+    
+    Parameters:
+    ------------
+    vYearOfFile       : String representing the ones column of the current four-digit
+    					year (e.g., 4 for 2014)
+    vIterOfFile       : Integer representing the unit for the current metric (0 for '%' 
+    					and 1 for '#')
+    vLoadedFileName   : String containing the name of the currently loaded file without
+    					the unit suffix
+    vIterVar          : Integer indicating the number of units present for the current 
+    					metric (either 1 or 2)
+    vAgesList         : String containing comma delimited list of relevant field names from 
+    				 	the current table
+    vHeadersList      : The updated field name(s) as returned by ColHeaderSub
+    vYearlyTablesList : String containing a comma separated working list of all tables 
+    					loaded in final for the given year (for subsequent iterative 
+                        combination of all tables together)
+    
+    Returns:
+    ---------
+    vYearlyTablesList : String containing updated comma separated working list of all 
+    					tables loaded in final for the given year (for subsequent 
+                        iterative combination of all tables together)
+  ****************************************************************************************/
+  [ComboMetricsTbl$(vYearOfFile)-$(vIterOfFile)]:
+    Load Distinct * Resident [$(vLoadedFileName)-%]
+  ;
+  If $(vIterVar)=2 then
+    call JoinPercAndRN (vLoadedFileName, vYearOfFile, vIterOfFile)
+    call GenMetricPopulation 
+    call HandleUniqueTableFormat (vRNField, vAgesList, vHeadersList, vYearlyTablesList)
+  end if
+end sub
+
+Sub CompileSSFileFeatsAndRows (vCorrHeader, vFullTableStr, vListOfYearlyTables, vCurrentYear, vCurrentIter)
+  /****************************************************************************************
+    Tests the conditions and calls the subroutines involved in identifying the main and
+    anomalistic substate tables if the latter exists for any given substate metric, and 
+    concats the two together. Maintains a list of all tables loaded in final for 
+    subsequent joining together of all tables within a given year. Called by 
+    CompileMetricSpecificTable.
+    
+    Parameters:
+    ------------
+    vCorrHeader         : The updated field name(s) as returned by ColHeaderSub
+    vFullTableStr       : The anomalistic table being selectively concatenated to the main 
+    				   	  table 
+    vListOfYearlyTables : String containing a comma separated working list of all tables 
+    					  loaded in final for the given year (for subsequent iterative 
+                          combination of all tables together)
+    vCurrentYear        : String representing the ones column of the current four-digit
+    					  year (e.g., 4 for 2014)
+    vCurrentIter        : Integer representing the unit for the current metric (0 for '%' 
+    					  and 1 for '#')
+    
+    Returns:
+    ---------
+    vListOfYearlyTables : String containing updated comma separated working list of all 
+    					  tables loaded in final for the given year (for subsequent 
+                          iterative 
+  ****************************************************************************************/
+  If WildMatch('$(vCorrHeader)', 'Use - Alc*', 'Use - Binge*')>0 and WildMatch('$(vFullTableStr)','*to 20*')<1 then
+    let vSSTblName = TableName(NoOfTables()-1);
+    let vTblSuffix = Trim(SubField('$(vCorrHeader)','-',2));
+    let vNewTblName = 'ConcatSS.$(vSSTblName).$(vTblSuffix)';
+    Rename Table [$(vSSTblName)] to [$(vNewTblName)];
+    if WildMatch('$(vTblSuffix)','*Alc*')>0 then
+      let vSSAlcTbl = 'ConcatSS.$(vSSTblName).$(vTblSuffix)';
+    else
+      let vSSBingeTbl = 'ConcatSS.$(vSSTblName).$(vTblSuffix)';
+    end if
+  ElseIf WildMatch('$(vFullTableStr)', '*to 20*')>0 then
+    let vSSTblName = TableName(NoOfTables()-1);
+    If WildMatch('$(vCorrHeader)','*Alc*')>0 then
+      call ConcatSSABTbl (vSSAlcTbl, 'Alc.', vSSTblName)        
+      Let vListOfYearlyTables = vListOfYearlyTables & If(Len(vListOfYearlyTables)>0,',') & Chr(39) & vSSAlcTbl & Chr(39) ;
+    end if
+    If WildMatch('$(vCorrHeader)', '*Binge*')>0 then
+      call ConcatSSABTbl (vSSBingeTbl, 'Binge', vSSTblName)
+      Let vListOfYearlyTables = vListOfYearlyTables & If(Len(vListOfYearlyTables)>0,',') & Chr(39) & vSSBingeTbl & Chr(39) ;
+    end if
+    Drop Table [$(vSSTblName)];
+  ElseIf WildMatch('$(vSSTblName)','*Concat*')<1 then
+    Rename Table [NewNewTbl-%] to [PercOnlyTbl$(vCurrentYear)-$(vCurrentIter)];
+    let vPercTblName = 'PercOnlyTbl$(vCurrentYear)-$(vCurrentIter)';
+    Let vListOfYearlyTables = vListOfYearlyTables & If(Len(vListOfYearlyTables)>0,',') & Chr(39) & vPercTblName & Chr(39) ;
+  end if
+end sub 
+
+Sub CompileMetricSpecificTable (vCurrentFile, vFilesList, vCurrentFileYear, vCurrentMainIter, vListComboTables)
+  /****************************************************************************************
+    Initializes variables and executes sequence of subroutines for loading and formatting 
+    the Tier1 statewide and substate data tables (separately) for a given metric and year. 
+    If the metric has raw number data in addition to percentage data, repeats the 
+    subroutine sequence before calling subroutines involved with combining all tables 
+    associated with a given metric together, keeping statewide and substate data separate 
+    for now. Called by LoadAndJoinYrTbls.
+    
+    Parameters:
+    ------------
+    vCurrentFile     : String containing name of the current loaded file
+    vFilesList       : String containing all the files in the Tier1 folder, returned by 
+    				   GenFilesList
+    vCurrentFileYear : String representing the ones column of the current four-digit year
+    				   (e.g., 4 for 2014)
+    vCurrentMainIter : Integer representing the unit for the current metric (0 for '%' and 
+    				   1 for '#')
+    vListComboTables : String containing a comma separated working list of all tables
+    				   loaded in final for the given year (for subsequent iterative 
+                       combination of all tables together)
+    
+    Returns:
+    ----------
+    vListComboTables : String containing uploaded comma separated working list of all 
+    				   tables loaded in final for the given year (for subsequent iterative 
+                       combination of all tables together)
+  ****************************************************************************************/
+  let vFileRN = Replace('$(vCurrentFile)','%','#');
+  let vIters = If(WildMatch('$(vCurrentFile)','*ss*')<1, If(WildMatch('$(vFilesList)','*$(vFileRN)*'),2,1), 1);
+  let vConcatTblIndic = If(WildMatch('$(vFilesList)','*$(vFileRN)*'),0,1);
+  for mainLoop = 1 to $(vIters)
+    call FileInit (mainLoop, vCurrentFile)
+    call SetupFields (vTblName, vFileStr, vAgeList) 
+    call FormatFields (vTblName, vTblFull) 
+    call LoadFields (vAgeList, vTblFull, vTblName, vFileStr)
+  next mainLoop
+  if WildMatch('$(vTblName)','*ss*')<1 and $(vConcatTblIndic)<1 then
+    call CompileRegFileFeatsAndRows (vCurrentFileYear, vCurrentMainIter, vLoadedFile, vIters, vAgeList, vHeaders, vListComboTables)
+  else
+    call CompileSSFileFeatsAndRows (vColHeader, vTblFull, vListComboTables, vCurrentFileYear, vCurrentMainIter)
+  end if
+end sub
+
+Sub JoinYrTbls (vJoinStmt, vJoinTbl, vBaseTbl, vJoinNum)
+  /****************************************************************************************
+    Loader subroutine used by JoinYearlyTbls to combine all tables for a given year 
+    together. Called by JoinYearlyTbls.
+    
+    Parameters: 
+    -----------
+    vJoinStmt : Depending on the iteration, either the empty string (first iteration) or 
+    			a string containing a 'Join' statement, including the table to join to
+                (all subsequent iterations)
+    vJoinTbl  : String containing the name of the table being joined to the main table
+    vBaseTbl  : String containing the name of the table to join all tables to
+    vJoinNum  : The iteration number for the current call to this method
+  ****************************************************************************************/
+  $(vJoinStmt)
+  Load Distinct * Resident [$(vJoinTbl)];
+  let vJoinStmt = 'Join ([$(vBaseTbl)])';
+  If $(vMergeNum)>1 then
+    Drop Table [$(vJoinTbl)];
+  end if
+  let vJoinNum = $(vJoinNum)+1;
+end sub
+
+Sub JoinYearlyTbls (vYrFls, vSubStateIndctr, vCombinedListofTables)
+  /****************************************************************************************
+    Initializes variables and iteratively calls JoinYrTbls to combine together all tables 
+    compiled by CompileMetricSpecificTable for a given year. Saves the name of the 
+    composite table for subsequent concatenation of statewide and substate data from a 
+    given year together. Called by LoadAndJoinYrTbls.
+    
+    Parameters:
+    ------------
+    vYrFls                : String containing name of the current loaded file
+    vSubStateIndctr       : Integer representing the unit for the current metric (0 for 
+    						'%' and 1 for '#')
+    vCombinedListofTables : String containing a comma separated working list of all tables
+    				   		loaded in final for the given year (for subsequent iterative 
+                       		combination of all tables together)
+    
+    Returns:
+    ---------
+    vSsTables : String containing the names of the statewide and substate combined tables
+    			for a given year. Returned by JoinYearlyTbls
+  ****************************************************************************************/
+  let vConcatTablesList=;
+  set vMainJoin=;
+  set vMainDrop=;
+  set vMainLoad=;
+  let vTableIndx = IF($(vYrFls)>0,$(vYrFls)-1+$(vSubStateIndctr),$(vYrFls));
+  let vMainTbl = TableName($(vTableIndx));
+  set vMergeNum = 1;
+  for each vMergeTbl in $(vCombinedListofTables)
+    call JoinYrTbls (vMainJoin, vMergeTbl, vMainTbl, vMergeNum)
+  next vMergeTbl
+  let vSsTables = vSsTables & If(len(vSsTables)>0,',') & If(len(vMainTbl)>0,Chr(39)) & vMainTbl & If(len(vMainTbl)>0,Chr(39)) ;
+end sub
+
+Sub LoadAndJoinYrTbls (vSSI, vFs, vYF)
+  /****************************************************************************************
+    Iterates through each metric in a given year, loading, formatting and combining 
+    together all statewide OR substate data associated with that metric, and joining 
+    together all statewide OR substate metric-specific tables for a given year. Statewide 
+    and substate data loaded and compiled separately and will be concatenated together in 
+    subsequent BuildSingleYearlyTbl.
+    
+    Parameters: 
+    ------------
+    vSSI : Indicator as to whether or not the current year has substate data
+    vFs  : String containing name of the current loaded file
+    vYF  : String representing the ones column of the current four-digit year (e.g., 4 for 
+    	   2014)
+    				   
+    
+    Returns:
+    ---------
+    vSsTables : String containing the names of the statewide and substate combined tables
+    			for a given year. Returned by JoinYearlyTbls
+  ****************************************************************************************/
+  let vMainIter=1;
+  let vSS = If($(vSSI)>0,'ss','');
+  let vComboTablesList=;
+  for each vfile in filelist('lib://Client Data - DBHDD GASPS Stream/QVD\NSDUH\Tier1\201$(vYearFiles)$(vSS)_Tab??_%.qvd')
+    call CompileMetricSpecificTable (vfile, vFs, vYF, vMainIter, vComboTablesList)
+    let vMainIter = $(vMainIter)+1;
+  next vfile
+  if (fmod($(vYF),2)=0) or $(vSSI)=0 then
+//     If WildMatch('$(vfile)', '*ss*')<1 or (WildMatch('$(vfile)', '*ss*')>0 and fmod($(vYF),2)=0) then 
+      call JoinYearlyTbls (vYF, vSSI, vComboTablesList)
+//     end if
+  end if
+end sub
+
+Sub ConcatSSTbls (vCSN, vCST, vSsConcatStmt)
+  /****************************************************************************************
+    Loader subroutine called by ConcatSsAndRegTbls to concatenate a given year's substate
+    data to the statewide data for that year. Called by ConcatSsAndRegTbls.
+    
+    Parameters:
+    ------------
+    vCSN 		  : The iteration number for the current call to this method
+    vCST 		  : String containing the name of the table to join all tables to
+    vSsConcatStmt : Depending on the iteration, either the empty string (first iteration) 
+    				or a string containing a 'Concatenate' statement, including the table 
+                    to concatenate to (all subsequent iterations)
+  ****************************************************************************************/
+  If $(vCSN)=1 then
+    let vMainSsTbl = vCST;
+  end if
+  $(vSsConcatStmt)
+  Load Distinct * Resident [$(vCST)];
+  let vSsConcatStmt = 'Concatenate ([$(vMainSsTbl)])';
+  If $(vCSN)>1 then
+    Drop Table [$(vCST)];
+  end if
+  let vCSN = $(vCSN)+1;
+end sub
+
+Sub ConcatSsAndRegTbls (vSubStTblList)
+  /****************************************************************************************
+    Initializes variables and iteratively calls ConcatSsTbls to concat the substate and 
+    statewide tables together for a given year. Called by BuildSingleYearlyTbl.
+    
+    Parameters:
+    ------------
+    vSubStTblList : String containing the names of the statewide and substate combined 
+    				tables for a given year. Returned by JoinYearlyTbls
+  ****************************************************************************************/
+  let vConcatSsNum=1;
+  let vSsConc=;
+  For each vSsTbl in $(vSubStTblList)
+    call ConcatSSTbls (vConcatSsNum, vSsTbl, vSsConc)
+  next vSsTbl
+end sub
+
+Sub BuildSingleYearlyTbl (vFls, vYFs, vYT)
+  /****************************************************************************************
+    Executes year-specific loops for loading, formatting and combining together all 
+    statewide and substate data for a given year. Adds the year's composite table name to 
+    a list for subsequent combination of all yearly tables together. Called by 
+    BuildYearlyTblsAndCompileList.
+    
+    Parameters:
+    ------------
+    vFls : String containing name of the current loaded file
+    vYFs : String representing the ones column of the current four-digit year (e.g., 4 for 
+    	   2014)
+    vYT  : String containing a comma separated working list of the fully-compiled year-
+    	   specific tables, containing both statewie and substate data, if applicable, for
+           all metrics from a given year
+    
+    Returns: 
+    --------
+    vYT : String containing updated comma separated working list of the fully-compiled 
+    	  year-specific tables, containing both statewie and substate data, if applicable, 
+          for all metrics from a given year
+   ****************************************************************************************/
+  let vSsTables=;
+  for vSubStIndic=0 to 1 Step 1 
+    call LoadAndJoinYrTbls (vSubStIndic, vFls, vYFs)
+  next vSubStIndic
+  If fmod($(vYFs),2)=0 and $(vYFs)>0 then
+    call ConcatSsAndRegTbls (vSsTables)
+  end if
+  let vYT = IF(fmod($(vYFs),2)=0 and $(vYFs)>0, vYT & If(len(vYT)>0,',') & Chr(39) & vMainSsTbl & Chr(39), vYT & If(len(vYT)>0,',') & Chr(39) & vMainTbl & Chr(39)) ;
+end sub
