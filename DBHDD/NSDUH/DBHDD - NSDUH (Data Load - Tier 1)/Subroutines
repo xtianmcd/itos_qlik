@@ -1,0 +1,139 @@
+Sub GetTitle (f)
+  /****************************************************************************************
+    Reads in the raw data file and determines its full name from the header information.
+    
+    Parameters
+    -----------
+    f : String containing the name of the current file. 
+    
+    Returns
+    --------
+    vTableName : String containing the full name of the current file. 
+  ****************************************************************************************/
+  GetTitleTemp :
+  LOAD * FROM $(f) (txt, embedded labels, delimiter is ',');
+  LET vTableName = FieldName(1,'GetTitleTemp');
+  DROP TABLE GetTitleTemp; 
+end Sub
+
+// DQR-004
+Sub FindHeaders (f)
+  /****************************************************************************************
+    Determines the number of header lines in the current file. 
+    
+    Parameters
+    -----------
+    f : String containing the name of the current file.
+    
+    Returns
+    --------
+    vHeaderSize : The number of lines in the raw file's header. 
+    
+  ****************************************************************************************/
+  FindHeadersTemp:
+  LOAD RecNo() as DataStart FROM $(f) (txt, no labels, delimiter is ',')
+  WHERE WildMatch(@1,'*Order*'); // 'Order' is the first column's Field name; all lines above are headers
+  LET vHeaderSize = peek('DataStart') - 1;
+  DROP TABLE FindHeadersTemp;
+end Sub
+
+// DQR-001 
+Sub TempFieldNames (f, hs, fn)
+  /****************************************************************************************
+    Builds a mapping for the field names in each raw file to their respective Tier-1 field 
+    names to correct for issues in some of the raw files' field naming conventions (i.e., 
+    erroneous duplicate field names in the same file). 
+  
+    Parameters
+    -----------
+    f  : String containing the name of the current file.
+    hs : The number of lines in the raw file's header. 
+    fn : String containing the abbreviated name of the file as it is saved in the Raw data
+    	 folder.
+  ****************************************************************************************/
+  ColHeader:
+    CrossTable(ColNum,NewFieldName)
+    LOAD 'Dummy' as Dummy,* FROM $(f) (txt, no labels, delimiter is ',', header is $(hs) lines)
+    WHERE RecNo()=1;
+    Drop Field Dummy;
+  NewColHeader:
+    Load ColNum,
+        Replace(ColNum, '@', '$(fn)_') as NewColNum,
+        If(WildMatch(Previous(NewFieldName2),'*Lower*')>0,
+            Replace(Previous(NewFieldName2),'Lower','Upper'),
+            NewFieldName2
+            ) as NewFieldName2;
+    Load ColNum,
+        Replace(ColNum, '@', '$(fn)_') as NewColNum,
+        If(WildMatch(NewFieldName,'Order','*State*','*Estimate','Map Group')>0,
+            NewFieldName & '_$(fn)',
+            If(WildMatch(Previous(NewFieldName),'*Estimate')>0,
+                SubField(Previous(NewFieldName),' Estimate',1) & ' 95% CI (Lower)' & '_$(fn)',
+                NewFieldName & '_$(fn)'
+            )
+        ) as NewFieldName2
+    Resident ColHeader;
+end Sub
+
+Sub MainTable (f, hs, fn, tn)
+  /****************************************************************************************
+    Loads the data from the rows corresponding to the desired location grouping; renames
+    the fields in the loaded table; adds a field with the full name of the file for 
+    identification of the metric the file represents during subsequent loads.
+    
+    Parameters
+    -----------
+    f  : String containing the name of the current file.
+    hs : The number of lines in the raw file's header. 
+    fn : String containing the abbreviated name of the file as it is saved in the Raw data
+    	 folder.
+    tn : String containing the full name of the current file.
+  ****************************************************************************************/
+  // Load in the data to be saved as qvd 
+  [RawTable]:
+    LOAD * FROM $(f)
+    (txt, no labels, delimiter is ',', msq, header is $(hs) lines)
+    WHERE match(@2, 'National', 'Total U.S.', 'South', 'Georgia');
+    for i=1 to NoOfFields('RawTable')
+      Rename field @$(i) to '$(fn)_$(i)';
+    next i
+  [Table]:
+    LOAD *, '$(tn)' as TableName_ // DQR-003
+    Resident RawTable;
+    Rename Table 'Table' to '$(fn)';
+
+    Trace Fetching Data for File at f completed;
+    Drop Table RawTable;
+    Drop Table ColHeader;
+end Sub
+
+Sub UniqueFieldNames
+  /****************************************************************************************
+    Applies the mapping generating in TempFieldNames to load the table with the correct 
+    Tier-1 field names.
+  ****************************************************************************************/
+  Drop Field ColNum;
+  FieldMap:
+    Mapping Load NewColNum, NewFieldName2
+    resident NewColHeader;  
+  Rename Fields using FieldMap;
+  Drop Table NewColHeader;
+end Sub
+
+Sub QVDStore (c, dest, sep)
+  /****************************************************************************************
+    Stores each table to the Tier-1 folder once formatting procedure is complete. 
+    
+    Parameters
+    -----------
+    c    : Integer representing the index of the loaded table to be saved during the 
+		   current iteration of this method.    	   
+    dest : String containing the path to the Tier-1 folder
+    sep  : String containing the separation character to be used to append the name of the
+    	   current table to the destination path (i.e., '/')
+  ****************************************************************************************/
+  LET vTblName = TableName(c);
+  Trace Store $(vTblName);
+  Let vQVD = dest & sep & vTblName;
+  STORE '$(vTblName)' INTO '$(vQVD).qvd' (qvd);
+end Sub
