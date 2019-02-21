@@ -1,0 +1,197 @@
+Sub JoinPercAndRN (vLoadedTable, vYearVar, vIterVar)
+  /****************************************************************************************
+    Joins together the percentage data and the raw number data for a given metric. Renames 
+    the combined table with a unique identifier. Called by CompileRegFileFeatsAndRows.
+    
+    Parameters
+    -----------
+    vLoadedTable : Name of current Tier1 table name without metric identifier 
+    vYearVar     : Ones place of the year the current table contains data for (e.g., 5 for 
+    			   2015)
+    vIterVar     : Integer representing the table number for the current year (e.g., 6 for 
+    			   Table 6 from 2012)
+  ****************************************************************************************/
+  Join ([$(vLoadedTable)-%]) 
+    Load * Resident [$(vLoadedTable)-#]
+  ;
+  Drop Table  [$(vLoadedTable)-#];
+  Rename Table [$(vLoadedTable)-%] to [ComboMetricsTbl$(vYearVar)-$(vIterVar)];
+end sub
+
+Sub JoinPopulationField (ff, vRN, vPerc, vP, vLT)
+  /****************************************************************************************
+    Calculates the metric-specific population size given the percentage and raw number 
+    data for a given metric. Loads this data as a new field and joins the field to the 
+    combined table loaded in JoinPercAndRN. Called by GenMetricPopulation.
+  ****************************************************************************************/
+  [PopTable-$(ff)]:
+    NoConcatenate
+      Load Distinct *, 
+        Div(Num($(vRN)) * 100, Num(SubField($(vPerc), '%', 1)))
+          + If(fmod(Num($(vRN)) * 100, Num(SubField($(vPerc), '%', 1)))>0,
+            1, 0
+            ) as $(vP)
+        Resident [$(vLT)]
+      ;
+  Join ([$(vLT)]) 
+    Load * Resident [PopTable-$(ff)]
+  ;
+  Drop Table [PopTable-$(ff)];
+end sub
+
+Sub GenMetricPopulation
+  /****************************************************************************************
+    Initializes the variables and calls subroutine for calculating and joining the metric-
+    specific population size to the combined table loaded by JoinPercAndRN. Called by 
+    CompileRegFileFeatsAndRows.
+  ****************************************************************************************/
+  let vMetricPop=;
+  let vComma=;
+  let vLastTab = TableName(NoOfTables()-1);
+  let vFields = NoOfFields('$(vLastTab)');
+  Set vListOfFields = ;
+  for f=4 to $(vFields) Step 1
+    let vRNField = FieldName($(f),'$(vLastTab)');    
+    If WildMatch('$(vRNField)', '*#*')>0 and WildMatch('$(vListOfFields)','*$(vRNField)*')<1 then
+      let vListOfFields = vListOfFields & If(Len(vListOfFields)>0,',') & vRNField ;
+      let vPercentField = SubField('$(vRNField)','#',1)&'%';
+      let vRawNum = '['&FieldName($(f), '$(vLastTab)')&']';
+      let vPercent = SubField('$(vRawNum)', '#', 1) & '%]';
+      let vPop = '[' & PurgeChar(FieldName($(f), '$(vLastTab)'), '%#') & 'Pop.]';
+      call JoinPopulationField (f, vRawNum, vPercent, vPop, vLastTab)
+    end if
+  next f
+end sub
+
+Sub SetMainAlcBingeTbls (vFieldRef, vTblRef)
+  /****************************************************************************************
+    Renames the main table for the metric(s) containing an anomalistic 12-20 age group 
+    table and saves the new name to a variable, depending on the metric. Called by 
+    HandleUniqueTableFormat.
+    
+    Parameters:
+    ------------
+    vFieldRef : The field name used to determine the metric, either 'Alc.' or 'Binge'
+    vTblRef   : The  original name of the table to be renamed
+    
+    Returns:
+    ---------
+    vAlcTbl   : The name of the main table for the 'Alc.' metric to be concatenated to
+    vBingeTbl : The name of the main table for the 'Binge' metric to be concatenated to
+  ****************************************************************************************/
+  let vTblSuffix = Trim(SubField('$(vFieldRef)','-',2));
+  let vNewTblName = 'Concat.$(vTblRef).$(vTblSuffix)';
+  Rename Table [$(vTblRef)] to [$(vNewTblName)];
+  if WildMatch('$(vTblSuffix)','*Alc*')>0 then
+    let vAlcTbl = 'Concat.$(vTblRef).$(vTblSuffix)';
+  else
+    let vBingeTbl = 'Concat.$(vTblRef).$(vTblSuffix)';
+  end if
+end sub
+
+Sub ConcatRegABTbl (vABMainTbl, AB, vCombinedTable)
+  /****************************************************************************************
+    Concatenates the table with the anomalistic 12-20 age group statewide data to its 
+    metric-specific statewide main table, uniquely named in SetMainAlcBingeTbls. 
+    Called by ConcatToAlcBingeTbls.
+    
+    Parameters:
+    ------------
+    vABMainTbl     : The name of statewide main table being concatenated to
+    AB             : The metric identifier, either 'Alc.' or 'Binge'
+    vCombinedTable : The anomalistic statewide table from which fields are selectively 
+    				 concatenated to the main table (if they correspond to the metric 
+                     identified by AB
+  ****************************************************************************************/
+  Concatenate([$(vABMainTbl)]) 
+    Load Year, Location, Age, [Use - $(AB) - #],[Use - $(AB) - %],[Use - $(AB) - Pop.] 
+    Resident [$(vCombinedTable)]
+  ;
+end sub
+
+Sub ConcatToAlcBingeTbls (vFieldNames, vCombinedTblName, vAlcMain, vTablesList, vFieldList, vBingeMain)
+  /****************************************************************************************
+    Identifies the metric of the currently loaded anomalistic table and calls 
+    ConcatRegABTbl with the appropriate parameters. Called by HandleUniqueTableFormat.
+    
+    Parameters: 
+    ------------
+    vFieldNames      : String containing field name(s) returned by GenAlcBingeFields
+    vCombinedTblName : The anomalistic table being selectively concatenated to the main 
+    				   table 
+    vAlcMain         : The name of main table for the 'Use - Alcohol' metric
+    vTablesList      : String containing a comma separated working list of all tables 
+                       loaded in final for the given year (for subsequent iterative 
+                       combination of all tables together)
+    vFieldList       : String containing comma delimited list of relevant field names from the 
+    			 	   current table
+    vBingeMain       : The name of main table for the 'Use - Binge' metric
+    
+    Returns: 
+    ---------
+    vTablesList : String containing updated comma separated working list of all tables 
+    			  loaded in final for the current year (for subsequent iterative 
+                  combination of all tables together)
+  ****************************************************************************************/
+  If WildMatch('$(vFieldNames)','*Alc*')>0 then
+    call ConcatRegABTbl (vAlcMain, 'Alc.', vCombinedTblName)
+    Let vTablesList = vTablesList & If(Len(vTablesList)>0,',') & Chr(39) & vAlcMain & Chr(39) ;
+  end if
+  If WildMatch('$(vFieldList)', '*Binge*')>0 then
+    call ConcatRegABTbl (vBingeMain, 'Binge', vCombinedTblName)
+    Let vTablesList = vTablesList & If(Len(vTablesList)>0,',') & Chr(39) & vBingeMain & Chr(39) ;
+  end if
+  Drop Table [$(vCombinedTblName)];
+end sub
+
+Sub HandleUniqueTableFormat (vRawNumField, vOrigFields, vCorrectFields, vListOfTables)
+  /****************************************************************************************
+    Tests the conditions and calls the subroutines involved in identifying the main and
+    anomalistic statewide tables if the latter exists for any given statewide metric, and 
+    concats the two together. Called by CompileRegFileFeatsAndRows.
+    
+    Parameters:
+    ------------
+    vRawNumField   : The field name for the raw number unit of the current table's metric
+    vOrigFields    : String containing comma delimited list of relevant field names from 
+    				 the current table
+    vCorrectFields : The updated field name(s) as returned by ColHeaderSub
+    vListOfTables  : String containing a comma separated working list of all tables loaded
+                     in final for the given year (for subsequent iterative combination of
+                     all tables together)
+    
+    Returns: 
+    ---------
+    vListOfTables : String containing updated comma separated working list of all tables 
+                    loaded in final for the given year (for subsequent iterative
+                    combination of all tables together)
+  ****************************************************************************************/
+  let vComboTblName = TableName(NoOfTables()-1);
+  If WildMatch('$(vRawNumField)', 'Use - Alc*', 'Use - Binge*')>0 and WildMatch('$(vOrigFields)','*Alcohol*','*Binge*')<1 then
+    call SetMainAlcBingeTbls (vRawNumField, vComboTblName)
+  ElseIf WildMatch('$(vOrigFields)', '*Alcohol*', '*Binge*')>0 then
+    call ConcatToAlcBingeTbls (vCorrectFields, vComboTblName, vAlcTbl, vListOfTables, vOrigFields, vBingeTbl)
+  ElseIf WildMatch('$(vComboTblName)','*Concat*')<1 then
+    Let vListOfTables = vListOfTables & If(Len(vListOfTables)>0,',') & Chr(39) & vComboTblName & Chr(39) ;
+  end if
+end sub
+
+Sub ConcatSSABTbl (vSSAlcBinge, AB, vSSResTbl)
+  /****************************************************************************************
+    Concatenates the table with the anomalistic 12-20 age group substate data to its 
+    metric-specific substate main table, uniquely named in CompileSSFileFeatsAndRows. 
+    Called by CompileSSFileFeatsAndRows.
+    
+    Parameters:
+    ------------
+    vSSAlcBinge : The name of main substate table being concatenated to
+    AB          : The metric identifier, either 'Alc.' or 'Binge'
+    vSSResTbl   : The anomalistic substate table from which fields are selectively 
+    			  concatenated to the main table (if they correspond to the metric 
+                  identified by AB
+  ****************************************************************************************/
+  Concatenate([$(vSSAlcBinge)]) 
+    Load Year, Location, Age, [Use - $(AB) - %] 
+    Resident [$(vSSResTbl)]
+  ;
+end sub
